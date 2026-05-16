@@ -1,5 +1,6 @@
 const express = require('express');
 const axios = require('axios');
+const AdmZip = require('adm-zip');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -14,9 +15,9 @@ app.use((req, res, next) => {
 
 const manifest = {
     id: 'org.subsource.stremio.addon',
-    version: '1.0.5',
+    version: '1.0.6',
     name: 'SubSource Subtitles',
-    description: 'Brings subtitles from SubSource.net to Stremio',
+    description: 'Brings decompressed subtitles from SubSource.net to Stremio',
     resources: ['subtitles'],
     types: ['movie', 'series'],
     idPrefixes: ['tt']
@@ -25,14 +26,13 @@ const manifest = {
 app.get('/', (req, res) => res.json(manifest));
 app.get('/manifest.json', (req, res) => res.json(manifest));
 
+// 1. ROUTE PRINCIPALE : Recherche des sous-titres
 app.get('/subtitles/:type/:id/:extra?.json', async (req, res) => {
     const { type, id } = req.params;
     const idParts = id.split(':');
-    const imdbId = idParts[0]; // Format ex: tt0816692
+    const imdbId = idParts[0];
     const season = idParts[1] ? parseInt(idParts[1]) : null;
     const episode = idParts[2] ? parseInt(idParts[2]) : null;
-
-    console.log(`[Stremio] Demande reçue pour ID IMDb : ${imdbId} (${type})`);
 
     const headers = {
         'X-API-Key': SUBSOURCE_API_KEY,
@@ -41,8 +41,6 @@ app.get('/subtitles/:type/:id/:extra?.json', async (req, res) => {
     };
 
     try {
-        // ÉTAPE 1 : Recherche du film sur SubSource via l'ID IMDb direct (Spécifié dans leur doc)
-        console.log(`[SubSource] Recherche du film par ID IMDb...`);
         const searchResponse = await axios.get(`${SUBSOURCE_BASE_URL}/movies/search`, {
             params: {
                 searchType: 'imdb',
@@ -52,39 +50,25 @@ app.get('/subtitles/:type/:id/:extra?.json', async (req, res) => {
             headers: headers
         });
 
-        // Validation de la structure de réponse : { success: true, data: [...] }
         if (!searchResponse.data || !searchResponse.data.success || !searchResponse.data.data || searchResponse.data.data.length === 0) {
-            console.log(`[SubSource] Aucun film trouvé pour l'ID IMDb : ${imdbId}`);
             return res.json({ subtitles: [] });
         }
 
-        // Récupération du "movieId" correct depuis le premier résultat
         const subsourceMovieId = searchResponse.data.data[0].movieId;
-        console.log(`[SubSource] Match réussi ! ID Interne SubSource (movieId) : ${subsourceMovieId}`);
 
-        // ÉTAPE 2 : Récupération des sous-titres associés à ce movieId
-        console.log(`[SubSource] Récupération des sous-titres...`);
         const subsResponse = await axios.get(`${SUBSOURCE_BASE_URL}/subtitles`, {
-            params: { 
-                movieId: subsourceMovieId
-            },
+            params: { movieId: subsourceMovieId },
             headers: headers
         });
 
         if (!subsResponse.data || !subsResponse.data.success || !subsResponse.data.data || !Array.isArray(subsResponse.data.data)) {
-            console.log(`[SubSource] Aucun sous-titre trouvé pour le movieId : ${subsourceMovieId}`);
             return res.json({ subtitles: [] });
         }
 
         let fetchedSubs = subsResponse.data.data;
-        console.log(`[SubSource] ${fetchedSubs.length} sous-titres bruts récupérés.`);
 
-        // ÉTAPE 3 : Filtrage des sous-titres (Saison / Épisode pour les séries)
         if (type === 'series' && season && episode) {
-            // Note : L'API de recherche d'un film/épisode peut déjà filtrer par saison si spécifié à l'étape 1,
-            // mais ce filtre de sécurité local assure la précision pour Stremio.
             fetchedSubs = fetchedSubs.filter(sub => {
-                // Si l'objet sous-titre contient directement la saison/épisode (ou via releaseInfo textuel)
                 const matchRelease = sub.releaseInfo && Array.isArray(sub.releaseInfo) 
                     ? sub.releaseInfo.join(' ').toLowerCase().includes(`s${String(season).padStart(2, '0')}e${String(episode).padStart(2, '0')}`)
                     : false;
@@ -92,41 +76,76 @@ app.get('/subtitles/:type/:id/:extra?.json', async (req, res) => {
             });
         }
 
-        // ÉTAPE 4 : Conversion au format requis par Stremio
+        // On récupère le protocole et l'hôte actuel de notre serveur sur Render pour créer le lien de téléchargement
+        const host = req.get('host');
+        const protocol = req.protocol;
+
         const stremioSubtitles = fetchedSubs.map(sub => {
             const langRaw = (sub.language || 'english').toLowerCase();
             
-            // Formatage de la langue en ISO 639-2 (3 lettres) pour Stremio
             let stremioLang = 'eng';
             if (langRaw.includes('french') || langRaw.includes('fra')) stremioLang = 'fre';
             if (langRaw.includes('arabic') || langRaw.includes('ara')) stremioLang = 'ara';
             if (langRaw.includes('spanish') || langRaw.includes('spa')) stremioLang = 'spa';
 
-            // Reconstruction de la chaîne d'informations de release (ex: "BluRay 1080p")
             const releaseLabel = Array.isArray(sub.releaseInfo) ? sub.releaseInfo.join(' ') : 'Release';
 
             return {
                 id: `subsource-${sub.subtitleId}`,
-                // Route de téléchargement direct spécifiée dans la documentation
-                url: `${SUBSOURCE_BASE_URL}/subtitles/${sub.subtitleId}/download`,
+                // ATTENTION : On redirige Stremio vers notre propre serveur pour extraire le ZIP
+                url: `${protocol}://${host}/download/${sub.subtitleId}`,
                 lang: stremioLang,
                 label: `[SubSource] ${sub.language} - ${releaseLabel}`
             };
         });
 
-        console.log(`[Addon] Envoi réussi de ${stremioSubtitles.length} sous-titres à Stremio.`);
         return res.json({ subtitles: stremioSubtitles });
 
     } catch (error) {
-        console.error(`[Erreur Générale] :`);
-        if (error.response) {
-            console.error(`Status d'erreur de l'API : ${error.response.status}`);
-            console.error(`Détails de la réponse :`, JSON.stringify(error.response.data));
-        } else {
-            console.error(error.message);
-        }
+        console.error(`[Erreur] :`, error.message);
         return res.json({ subtitles: [] });
     }
 });
 
-app.listen(PORT, () => console.log(`Addon SubSource v1.0.5 prêt et configuré.`));
+// 2. NOUVELLE ROUTE : Téléchargement et Décompression automatique du ZIP
+app.get('/download/:subtitleId', async (req, res) => {
+    const { subtitleId } = req.params;
+    console.log(`[Décompression] Traitement du sous-titre ID: ${subtitleId}`);
+
+    try {
+        // Téléchargement du fichier ZIP depuis SubSource en format binaire (arraybuffer)
+        const zipResponse = await axios.get(`${SUBSOURCE_BASE_URL}/subtitles/${subtitleId}/download`, {
+            headers: { 'X-API-Key': SUBSOURCE_API_KEY },
+            responseType: 'arraybuffer'
+        });
+
+        // Chargement du buffer dans adm-zip
+        const zip = new AdmZip(Buffer.from(zipResponse.data));
+        const zipEntries = zip.getEntries();
+
+        // Recherche du premier fichier se terminant par .srt ou .vtt dans l'archive
+        const subtitleFile = zipEntries.find(entry => 
+            entry.entryName.toLowerCase().endsWith('.srt') || 
+            entry.entryName.toLowerCase().endsWith('.vtt')
+        );
+
+        if (!subtitleFile) {
+            console.log(`[Décompression] Aucun fichier .srt trouvé dans le ZIP.`);
+            return res.status(404).send('No SRT file found inside the zip archive.');
+        }
+
+        // Extraction du texte brut du sous-titre
+        const subtitleText = zip.readAsText(subtitleFile);
+
+        // Envoi à Stremio avec les bons en-têtes texte et encodage UTF-8
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${subtitleFile.entryName}"`);
+        return res.send(subtitleText);
+
+    } catch (error) {
+        console.error(`[Erreur Décompression] :`, error.message);
+        return res.status(500).send('Error extracting subtitle.');
+    }
+});
+
+app.listen(PORT, () => console.log(`Addon SubSource v1.0.6 actif avec extracteur de ZIP.`));
