@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 const manifest = {
     id: 'org.subsource.stremio.addon',
     version: '1.0.6',
-    name: 'SubSource Subtitles',
+    name: 'DZ-Subtitles',
     description: 'Brings decompressed subtitles from SubSource.net to Stremio',
     resources: ['subtitles'],
     types: ['movie', 'series'],
