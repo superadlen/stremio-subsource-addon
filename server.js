@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 const manifest = {
     id: 'org.subsource.stremio.addon',
     version: '1.0.6',
-    name: 'DZ-Subtitles',
+    name: '✏️DZ-Subtitles',
     description: 'Brings decompressed subtitles from SubSource.net to Stremio',
     resources: ['subtitles'],
     types: ['movie', 'series'],
@@ -95,7 +95,7 @@ app.get('/subtitles/:type/:id/:extra?.json', async (req, res) => {
                 // ATTENTION : On redirige Stremio vers notre propre serveur pour extraire le ZIP
                 url: `${protocol}://${host}/download/${sub.subtitleId}`,
                 lang: stremioLang,
-                label: `[SubSource] ${sub.language} - ${releaseLabel}`
+                label: `[Adlen] ${sub.language} - ${releaseLabel}`
             };
         });
 
